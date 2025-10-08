@@ -5,6 +5,7 @@ import { useAuth } from '@/context/AuthContext'
 
 type Holding = { symbol: string; total: number }
 
+// Updated to fetch holdings from server-side API
 export default function HoldingsPage() {
   const { user } = useAuth()
   const [holdings, setHoldings] = useState<Holding[]>([])
@@ -17,53 +18,23 @@ export default function HoldingsPage() {
     setLoading(true)
     setError(null)
     try {
-      const resp = await supabase
-        .from('transactions')
-        .select('symbol, amount')
-        .eq('user_id', user.id)
-        .limit(10000)
+  const { data: sessionData } = await supabase.auth.getSession()
+  const token = sessionData?.session?.access_token ?? ''
 
-      // supabase-js may return { data, error }
-  const respAny = resp as { data?: unknown; error?: unknown }
-  const data = respAny.data ?? resp
-  const err = respAny.error ?? null
-      if (err) {
-        const errObj = err as unknown
-        let em = String(errObj)
-        if (errObj && typeof errObj === 'object' && 'message' in errObj) {
-          
-          em = (errObj as { message?: string }).message ?? em
-        }
-        setError(em)
-        setLoading(false)
-        return
-      }
-      if (!Array.isArray(data)) {
-        console.error('Unexpected holdings query response', resp)
-        setError('Unexpected response from database')
-        setLoading(false)
-        return
-      }
-      // proceed with data
-      // aggregate in-memory
-      const map: Record<string, number> = {}
-      type Row = { symbol?: string; amount?: number }
-      ;((data as Row[]) ?? []).forEach((r) => {
-        const sym = String(r.symbol ?? '').toUpperCase()
-        const amt = Number(r.amount ?? 0)
-        map[sym] = (map[sym] ?? 0) + amt
-      })
-      const arr = Object.entries(map).map(([symbol, total]) => ({ symbol, total }))
-      // apply client-side symbol filter
-      const filtered = filterSymbol ? arr.filter(a => a.symbol.includes(filterSymbol.toUpperCase())) : arr
-      setHoldings(filtered)
+      const params = new URLSearchParams()
+      if (filterSymbol) params.set('symbol', filterSymbol)
+      params.set('page', '1')
+      params.set('pageSize', '100')
+
+  const res = await fetch('/api/holdings?' + params.toString(), { headers: { Authorization: `Bearer ${token}`, 'x-user-id': user.id } })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'Failed to load holdings')
+      setHoldings((json.data ?? []) as Holding[])
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+    } finally {
       setLoading(false)
-      return
-    } catch (e) {
-      console.error('Holdings query failed', e)
-      setError(String(e))
-      setLoading(false)
-      return
     }
   }, [user, filterSymbol])
 

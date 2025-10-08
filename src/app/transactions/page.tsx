@@ -21,22 +21,27 @@ export default function TransactionsPage() {
     if (!user) return
     setLoading(true)
     setError(null)
-    let query = supabase
-      .from('transactions')
-      .select('id, symbol, amount, price_usd, order_type, date, file_name')
-      .eq('user_id', user.id)
+    try {
+  const { data: sessionData } = await supabase.auth.getSession()
+  const token = sessionData?.session?.access_token ?? ''
+      const params = new URLSearchParams()
+      params.set('page', String(page))
+      params.set('pageSize', String(pageSize))
+      if (filterSymbol) params.set('symbol', filterSymbol)
+      if (filterFile) params.set('file', filterFile)
+      if (fromDate) params.set('from', fromDate)
+      if (toDate) params.set('to', toDate)
 
-    if (filterSymbol) query = query.ilike('symbol', `%${filterSymbol}%`)
-    if (filterFile) query = query.ilike('file_name', `%${filterFile}%`)
-    if (fromDate) query = query.gte('date', fromDate)
-    if (toDate) query = query.lte('date', toDate)
-
-    const offset = (page - 1) * pageSize
-    const { data, error } = await query.order('date', { ascending: false }).range(offset, offset + pageSize - 1)
-
-    if (error) setError(error.message)
-    else setRows((data ?? []) as Tx[])
-    setLoading(false)
+  const res = await fetch('/api/transactions?' + params.toString(), { headers: { Authorization: `Bearer ${token}`, 'x-user-id': user.id } })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'Failed to load')
+      setRows((json.data ?? []) as Tx[])
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+    } finally {
+      setLoading(false)
+    }
   }, [user, filterSymbol, filterFile, fromDate, toDate, page, pageSize])
 
   useEffect(() => {
