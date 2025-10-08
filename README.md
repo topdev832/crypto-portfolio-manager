@@ -65,3 +65,29 @@ To fix this in VS Code:
 
 If you prefer a quicker workaround, set the language mode of the open SQL file to `SQL` or `PostgreSQL` using the language selector in the bottom-right of VS Code.
 
+## Local setup (quick)
+
+
+• Create a `.env.local` in the project root and add:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+```
+
+• Install and run:
+
+```powershell
+npm install
+npm run dev
+```
+
+• Visit `http://localhost:3000` and sign up or sign in.
+
+## Deployment
+
+- Deploy to Vercel, set the three environment variables above in the Vercel project settings.
+- Confirm RLS policies in Supabase to restrict access to each user's rows (see policies above).
+
+

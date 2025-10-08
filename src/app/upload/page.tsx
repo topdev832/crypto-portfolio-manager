@@ -13,7 +13,9 @@ export default function UploadPage() {
   const { user } = useAuth()
   const [file, setFile] = useState<File | null>(null)
   const [msg, setMsg] = useState('')
-  const [preview, setPreview] = useState<Array<{ symbol: string; amount: any; amountDisplay: string; price?: any; priceDisplay?: string; order_type?: string; date: Date | null; dateDisplay: string; dateISO: string; raw: any }>>([])
+  const [uploadDate, setUploadDate] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [preview, setPreview] = useState<Array<{ symbol: string; amount: any; amountDisplay: string; price?: any; priceDisplay?: string; order_type?: string; date: Date | null; dateDisplay: string; dateISO: string; raw: any; isDuplicate?: boolean; isNegative?: boolean }>>([])
   const [selected, setSelected] = useState<Record<number, boolean>>({})
 
   const onFile = (f: File | null) => setFile(f)
@@ -66,6 +68,17 @@ export default function UploadPage() {
       return new Date(Math.round((serial - 25569) * 86400 * 1000))
     }
 
+    // Basic validation: required columns
+    const firstRow = rows[0] ?? {}
+    const headerKeys = Object.keys(firstRow).map((k: string) => k.toLowerCase())
+    const hasSymbol = headerKeys.some((k: string) => ['symbol', 'asset', 'ticker'].includes(k))
+    const hasAmount = headerKeys.some((k: string) => ['amount', 'quantity', 'qty'].includes(k))
+    const hasDate = headerKeys.some((k: string) => ['date', 'trade date', 'timestamp'].includes(k))
+    if (!hasSymbol || !hasAmount || !hasDate) {
+      setMsg('File missing required headers: symbol, amount, date. Please ensure your file has these columns.')
+      return
+    }
+
     // Map to preview shape using common column names and format for display
     const mapped = rows.map((r: any) => {
       const symbolRaw = r.symbol ?? r.Symbol ?? r['Asset'] ?? r['Ticker'] ?? ''
@@ -109,7 +122,15 @@ export default function UploadPage() {
       const dateDisplay = dateVal instanceof Date ? dateVal.toLocaleDateString() : String(dateRaw)
       const dateISO = dateVal instanceof Date ? dateVal.toISOString().slice(0, 10) : ''
 
-  return { raw: r, symbol: String(symbolRaw).trim(), amount: amountRaw, amountDisplay, price: priceVal, priceDisplay, order_type: String(orderRaw), date: dateVal, dateDisplay, dateISO }
+      return { raw: r, symbol: String(symbolRaw).trim(), amount: amountRaw, amountDisplay, price: priceVal, priceDisplay, order_type: String(orderRaw), date: dateVal, dateDisplay, dateISO, isDuplicate: false, isNegative: (typeof amountRaw === 'number' && amountRaw < 0) }
+    })
+
+    // detect duplicates in preview (same symbol|amount|date)
+    const seen = new Set<string>()
+    mapped.forEach((row) => {
+      const key = `${row.symbol}|${String(row.amount)}|${row.dateISO}`
+      if (seen.has(key)) row.isDuplicate = true
+      else seen.add(key)
     })
 
     setPreview(mapped)
@@ -123,24 +144,46 @@ export default function UploadPage() {
 
   const submit = async () => {
     setMsg('')
-    if (preview.length === 0) return setMsg('No preview available. Click "Preview" first.')
+    if (preview.length === 0) {
+      setBusy(false)
+      return setMsg('No preview available. Click "Preview" first.')
+    }
 
-    if (!user) return setMsg('Please sign in before uploading')
+    if (!user) {
+      setBusy(false)
+      return setMsg('Please sign in before uploading')
+    }
+
+    setBusy(true)
 
     const rowsToUpload: Tx[] = []
     for (let i = 0; i < preview.length; i++) {
       if (!selected[i]) continue
       const r = preview[i]
-      if (!r.symbol || !r.amount || !r.dateISO) continue
-      rowsToUpload.push({ symbol: String(r.symbol), amount: Number(r.amount), price_usd: typeof r.price === 'number' ? Number(r.price) : undefined, order_type: r.order_type || undefined, date: r.dateISO, file_name: file?.name, user_id: user.id })
+  if (!r.symbol || !r.amount || !r.dateISO) continue
+  // skip obvious negatives/duplicates on client
+  if (r.isNegative) continue
+  if (r.isDuplicate) continue
+  rowsToUpload.push({ symbol: String(r.symbol), amount: Number(r.amount), price_usd: typeof r.price === 'number' ? Number(r.price) : undefined, order_type: r.order_type || undefined, date: r.dateISO, file_name: file?.name, user_id: user.id })
     }
 
     if (rowsToUpload.length === 0) return setMsg('No valid rows selected for upload.')
 
-    const res = await fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows: rowsToUpload }) })
-    const json = await res.json()
-    if (res.ok) setMsg('Inserted ' + json.inserted + ' rows')
-    else setMsg('Error: ' + json.error)
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows: rowsToUpload }) })
+      const json = await res.json()
+      if (res.ok) {
+        const inserted = json.inserted ?? 0
+        const skipped = json.skipped ?? []
+        let m = 'Inserted ' + inserted + ' rows'
+        if (skipped.length > 0) m += ' — skipped ' + skipped.length + ' rows (duplicates/invalid)'
+        setMsg(m)
+      } else setMsg('Error: ' + json.error)
+    } catch (err: any) {
+      setMsg('Upload failed: ' + String(err))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -151,15 +194,18 @@ export default function UploadPage() {
       <p className="mt-2 text-xs text-gray-600">If you can&apos;t see CSV files in the dialog: navigate to the folder containing them, set the File name box to <code>*.csv</code> or change the file type selector to &quot;All files&quot;.</p>
 
       <div className="mt-3 flex gap-2">
-        <button onClick={parseToPreview} className="bg-gray-200 px-3 py-2 rounded">Preview</button>
-        <button onClick={submit} className="bg-blue-600 text-white px-3 py-2 rounded">Upload</button>
+        <button onClick={parseToPreview} disabled={busy} className="bg-gray-200 px-3 py-2 rounded disabled:opacity-60">Preview</button>
+        <button onClick={submit} disabled={busy} className="bg-blue-600 text-white px-3 py-2 rounded disabled:opacity-60">{busy ? 'Uploading...' : 'Upload'}</button>
       </div>
 
       {msg && <p className="mt-2">{msg}</p>}
 
       {preview.length > 0 && (
         <div className="mt-4">
-          <h3 className="font-semibold">Preview (first 50 rows)</h3>
+          <div className="flex items-baseline justify-between">
+            <h3 className="font-semibold">Preview (first 50 rows)</h3>
+            <div className="text-sm text-gray-600">File: {file?.name} {uploadDate ? ` • preview date: ${uploadDate}` : ''}</div>
+          </div>
           <table className="w-full text-sm border-collapse mt-2">
             <thead>
               <tr>
@@ -169,6 +215,7 @@ export default function UploadPage() {
                 <th className="text-right font-medium">Price</th>
                 <th className="text-center font-medium">Order</th>
                 <th className="text-left font-medium">Date</th>
+                <th className="text-left font-medium">Status</th>
               </tr>
             </thead>
             <tbody>
@@ -180,6 +227,10 @@ export default function UploadPage() {
                     <td className="text-right">{r.priceDisplay}</td>
                     <td className="text-center">{r.order_type}</td>
                     <td>{r.dateDisplay}</td>
+                    <td className="pl-2 text-xs text-gray-500">
+                      {r.isDuplicate && <span className="text-yellow-600">Duplicate</span>}
+                      {r.isNegative && <span className="text-red-600"> Negative</span>}
+                    </td>
                   </tr>
               ))}
             </tbody>

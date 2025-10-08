@@ -1,0 +1,110 @@
+"use client"
+import React, { useEffect, useState, useCallback } from 'react'
+import { useAuth } from '@/context/AuthContext'
+import { supabase } from '@/lib/supabaseClient'
+
+type Tx = { id: string; symbol: string; amount: number; price_usd?: number | null; order_type?: string | null; date: string | null; file_name?: string | null }
+
+export default function TransactionsPage() {
+  const { user } = useAuth()
+  const [rows, setRows] = useState<Tx[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [page, setPage] = useState(1)
+  const [pageSize] = useState(25)
+  const [filterSymbol, setFilterSymbol] = useState('')
+  const [filterFile, setFilterFile] = useState('')
+  const [fromDate, setFromDate] = useState<string | null>(null)
+  const [toDate, setToDate] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    if (!user) return
+    setLoading(true)
+    setError(null)
+    try {
+  const { data: sessionData } = await supabase.auth.getSession()
+  const token = sessionData?.session?.access_token ?? ''
+      const params = new URLSearchParams()
+      params.set('page', String(page))
+      params.set('pageSize', String(pageSize))
+      if (filterSymbol) params.set('symbol', filterSymbol)
+      if (filterFile) params.set('file', filterFile)
+      if (fromDate) params.set('from', fromDate)
+      if (toDate) params.set('to', toDate)
+
+  const res = await fetch('/api/transactions?' + params.toString(), { headers: { Authorization: `Bearer ${token}`, 'x-user-id': user.id } })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error ?? 'Failed to load')
+      setRows((json.data ?? []) as Tx[])
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+    } finally {
+      setLoading(false)
+    }
+  }, [user, filterSymbol, filterFile, fromDate, toDate, page, pageSize])
+
+  useEffect(() => {
+    load()
+    if (!user) return
+    const channel = supabase.channel('public:transactions')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, () => {
+        load()
+      })
+      .subscribe()
+
+    return () => { try { channel.unsubscribe() } catch {} }
+  }, [user, load])
+
+  if (!user) return <div className="p-4">Please sign in to view your transactions.</div>
+
+  return (
+    <div className="p-4">
+      <h2 className="text-lg font-bold mb-3">My Transactions (Realtime)</h2>
+      <div className="flex gap-2 items-center mb-3">
+        <input value={filterSymbol} onChange={e => setFilterSymbol(e.target.value)} placeholder="Filter symbol" className="border px-2 py-1 rounded" />
+        <input value={filterFile} onChange={e => setFilterFile(e.target.value)} placeholder="Filter file" className="border px-2 py-1 rounded" />
+        <input type="date" onChange={e => setFromDate(e.target.value || null)} className="border px-2 py-1 rounded" />
+        <input type="date" onChange={e => setToDate(e.target.value || null)} className="border px-2 py-1 rounded" />
+        <button onClick={() => { setPage(1); load() }} className="bg-gray-100 px-3 py-1 rounded">Apply</button>
+      </div>
+      {loading && <p>Loading...</p>}
+      {error && <p className="text-red-600">Error: {error}</p>}
+      {!loading && rows.length === 0 && <p>No transactions found.</p>}
+
+      {rows.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm border-collapse">
+            <thead>
+              <tr>
+                <th className="text-left font-medium">Date</th>
+                <th className="text-left font-medium">Symbol</th>
+                <th className="text-right font-medium">Amount</th>
+                <th className="text-right font-medium">Price (USD)</th>
+                <th className="text-center font-medium">Order</th>
+                <th className="text-left font-medium">File</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.id} className="border-t">
+                  <td>{r.date ?? ''}</td>
+                  <td>{r.symbol}</td>
+                  <td className="text-right">{r.amount}</td>
+                  <td className="text-right">{r.price_usd ?? ''}</td>
+                  <td className="text-center">{r.order_type ?? ''}</td>
+                  <td>{r.file_name ?? ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="mt-3 flex items-center gap-2">
+        <button disabled={page <= 1} onClick={() => { setPage(p => Math.max(1, p-1)); load() }} className="px-3 py-1 border rounded">Prev</button>
+        <div>Page {page}</div>
+        <button onClick={() => { setPage(p => p+1); load() }} className="px-3 py-1 border rounded">Next</button>
+      </div>
+    </div>
+  )
+}
