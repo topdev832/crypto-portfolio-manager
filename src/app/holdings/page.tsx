@@ -10,48 +10,86 @@ export default function HoldingsPage() {
   const [holdings, setHoldings] = useState<Holding[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [filterSymbol, setFilterSymbol] = useState('')
 
   const load = useCallback(async () => {
     if (!user) return
     setLoading(true)
     setError(null)
+    try {
+      const resp = await supabase
+        .from('transactions')
+        .select('symbol, amount')
+        .eq('user_id', user.id)
+        .limit(10000)
 
-    const { data, error } = await supabase
-      .from('transactions')
-      .select('symbol, amount')
-      .eq('user_id', user.id)
-      .limit(10000)
-
-    if (error) {
-      setError(error.message)
+      // supabase-js may return { data, error }
+  const respAny = resp as { data?: unknown; error?: unknown }
+  const data = respAny.data ?? resp
+  const err = respAny.error ?? null
+      if (err) {
+        const errObj = err as unknown
+        let em = String(errObj)
+        if (errObj && typeof errObj === 'object' && 'message' in errObj) {
+          
+          em = (errObj as { message?: string }).message ?? em
+        }
+        setError(em)
+        setLoading(false)
+        return
+      }
+      if (!Array.isArray(data)) {
+        console.error('Unexpected holdings query response', resp)
+        setError('Unexpected response from database')
+        setLoading(false)
+        return
+      }
+      // proceed with data
+      // aggregate in-memory
+      const map: Record<string, number> = {}
+      type Row = { symbol?: string; amount?: number }
+      ;((data as Row[]) ?? []).forEach((r) => {
+        const sym = String(r.symbol ?? '').toUpperCase()
+        const amt = Number(r.amount ?? 0)
+        map[sym] = (map[sym] ?? 0) + amt
+      })
+      const arr = Object.entries(map).map(([symbol, total]) => ({ symbol, total }))
+      // apply client-side symbol filter
+      const filtered = filterSymbol ? arr.filter(a => a.symbol.includes(filterSymbol.toUpperCase())) : arr
+      setHoldings(filtered)
+      setLoading(false)
+      return
+    } catch (e) {
+      console.error('Holdings query failed', e)
+      setError(String(e))
       setLoading(false)
       return
     }
-
-    // aggregate in-memory
-    const map: Record<string, number> = {}
-    type Row = { symbol?: string; amount?: number }
-    ;((data as Row[]) ?? []).forEach((r) => {
-      const sym = String(r.symbol ?? '').toUpperCase()
-      const amt = Number(r.amount ?? 0)
-      map[sym] = (map[sym] ?? 0) + amt
-    })
-    const arr = Object.entries(map).map(([symbol, total]) => ({ symbol, total }))
-    setHoldings(arr)
-    setLoading(false)
-  }, [user])
+  }, [user, filterSymbol])
 
   useEffect(() => {
-    load()
-    if (!user) return
-    const channel = supabase
-      .channel('public:transactions')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, () => {
-        load()
-      })
-      .subscribe()
+    ;(async () => {
+      try {
+        await load()
+        if (!user) return
+        if (typeof (supabase as unknown as { channel?: unknown }).channel !== 'function') {
+          console.warn('supabase.channel is not available in this environment')
+          return
+        }
+        const channel = supabase
+          .channel('public:transactions')
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'transactions' }, () => {
+            load()
+          })
+          .subscribe()
 
-    return () => { try { channel.unsubscribe() } catch {} }
+        return () => { try { channel.unsubscribe() } catch (e) { console.error('channel unsubscribe failed', e) } }
+      } catch (err) {
+        console.error('Holdings load/subscribe error', err)
+        const message = err instanceof Error ? err.message : String(err)
+        setError(message)
+      }
+    })()
   }, [load, user])
 
   if (!user) return <div className="p-4">Please sign in to view holdings.</div>
@@ -59,6 +97,9 @@ export default function HoldingsPage() {
   return (
     <div className="p-4">
       <h2 className="text-lg font-bold mb-3">Holdings</h2>
+      <div className="mb-3">
+        <input placeholder="Filter symbol" value={filterSymbol} onChange={e => setFilterSymbol(e.target.value)} className="border px-2 py-1 rounded" />
+      </div>
       {loading && <p>Loading...</p>}
       {error && <p className="text-red-600">Error: {error}</p>}
       {holdings.length === 0 && !loading && <p>No holdings found.</p>}
